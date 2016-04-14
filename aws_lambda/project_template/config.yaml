@@ -12,3 +12,4 @@ aws_secret_access_key:
 # dist_directory: dist
 # timeout: 15
 # memory_size: 512
+# standalone: false

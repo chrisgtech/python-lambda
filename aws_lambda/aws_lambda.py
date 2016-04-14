@@ -125,9 +125,10 @@ def build(src):
     # for the output filename.
     function_name = cfg.get('function_name')
     output_filename = "{0}-{1}.zip".format(timestamp(), function_name)
-
     path_to_temp = mkdtemp(prefix='aws-lambda')
-    pip_install_to_target(path_to_temp)
+    standalone = cfg.get('standalone', False)
+    if not standalone:
+        pip_install_to_target(path_to_temp)
 
     # Gracefully handle whether ".zip" was included in the filename or not.
     output_filename = ('{0}.zip'.format(output_filename)
