@@ -21,7 +21,7 @@ test_requirements = [
 
 setup(
     name='python-lambda',
-    version='0.1.11',
+    version='0.5.0',
     description="The bare minimum for a Python app running on Amazon Lambda.",
     long_description=readme + '\n\n' + history,
     author="Nick Ficano",
@@ -29,7 +29,7 @@ setup(
     url='https://github.com/nficano/python-lambda',
     packages=find_packages(),
     package_data={
-        'aws_lambda': ['templates/*'],
+        'aws_lambda': ['project_templates/*'],
         '': ['*.json'],
     },
     include_package_data=True,

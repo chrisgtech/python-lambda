@@ -16,13 +16,20 @@ def cli():
 
 
 @click.command(help="Create a new function for Lambda.")
-def init():
-    aws_lambda.init(CURRENT_DIR)
+@click.argument('folder', nargs=-1, type=click.Path(file_okay=False, writable=True))
+def init(folder):
+    path = CURRENT_DIR
+    if len(folder) > 0:
+        path = "{}/{}".format(CURRENT_DIR, folder[0])
+        if not os.path.exists(path):
+            os.makedirs(path)
+    aws_lambda.init(path)
 
 
 @click.command(help="Bundles package for deployment.")
-def build():
-    aws_lambda.build(CURRENT_DIR)
+@click.option('--local-package', default=None, help='Install local package as well.', type=click.Path())
+def build(local_package):
+    aws_lambda.build(CURRENT_DIR, local_package)
 
 
 @click.command(help="Run a local test of your function.")
@@ -33,12 +40,20 @@ def invoke(event_file, verbose):
 
 
 @click.command(help="Register and deploy your code to lambda.")
-def deploy():
-    aws_lambda.deploy(CURRENT_DIR)
+@click.option('--local-package', default=None, help='Install local package as well.', type=click.Path())
+def deploy(local_package):
+    aws_lambda.deploy(CURRENT_DIR, local_package)
+
+
+@click.command(help="Delete old versions of your functions")
+@click.option("--keep-last", type=int, prompt="Please enter the number of recent versions to keep")
+def cleanup(keep_last):
+    aws_lambda.cleanup_old_versions(CURRENT_DIR, keep_last)
 
 if __name__ == '__main__':
     cli.add_command(init)
     cli.add_command(invoke)
     cli.add_command(deploy)
     cli.add_command(build)
+    cli.add_command(cleanup)
     cli()

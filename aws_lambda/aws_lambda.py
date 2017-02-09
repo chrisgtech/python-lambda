@@ -8,22 +8,69 @@ from imp import load_source
 from shutil import copy, copyfile
 from tempfile import mkdtemp
 
+import botocore
 import boto3
 import pip
 import yaml
-from . import project_template
+
 from .helpers import mkdir, read, archive, timestamp
 
 
 log = logging.getLogger(__name__)
 
 
-def deploy(src):
+def cleanup_old_versions(src, keep_last_versions):
+    """Deletes old deployed versions of the function in AWS Lambda.
+
+    Won't delete $Latest and any aliased version
+
+    :param str src:
+        The path to your Lambda ready project (folder must contain a valid
+        config.yaml and handler module (e.g.: service.py).
+    :param int keep_last_versions:
+        The number of recent versions to keep and not delete
+    """
+    if keep_last_versions <= 0:
+        print("Won't delete all versions. Please do this manually")
+    else:
+        path_to_config_file = os.path.join(src, 'config.yaml')
+        cfg = read(path_to_config_file, loader=yaml.load)
+
+        aws_access_key_id = cfg.get('aws_access_key_id')
+        aws_secret_access_key = cfg.get('aws_secret_access_key')
+
+        client = get_client('lambda', aws_access_key_id, aws_secret_access_key,
+                            cfg.get('region'))
+
+        response = client.list_versions_by_function(
+            FunctionName=cfg.get("function_name")
+        )
+        versions = response.get("Versions")
+        if len(response.get("Versions")) < keep_last_versions:
+            print("Nothing to delete. (Too few versions published)")
+        else:
+            version_numbers = [elem.get("Version") for elem in
+                               versions[1:-keep_last_versions]]
+            for version_number in version_numbers:
+                try:
+                    client.delete_function(
+                        FunctionName=cfg.get("function_name"),
+                        Qualifier=version_number
+                    )
+                except botocore.exceptions.ClientError as e:
+                    print("Skipping Version {}: {}".format(version_number,
+                                                              e.message))
+
+
+def deploy(src, local_package=None):
     """Deploys a new function to AWS Lambda.
 
     :param str src:
         The path to your Lambda ready project (folder must contain a valid
         config.yaml and handler module (e.g.: service.py).
+    :param str local_package:
+        The path to a local package with should be included in the deploy as
+        well (and/or is not available on PyPi)
     """
     # Load and parse the config file.
     path_to_config_file = os.path.join(src, 'config.yaml')
@@ -33,7 +80,7 @@ def deploy(src):
     # folder then add the handler file in the root of this directory.
     # Zip the contents of this folder into a single file and output to the dist
     # directory.
-    path_to_zip_file = build(src)
+    path_to_zip_file = build(src, local_package)
 
     if function_exists(cfg, cfg.get('function_name')):
         update_function(cfg, path_to_zip_file)
@@ -90,26 +137,24 @@ def init(src, minimal=False):
         Minimal possible template files (excludes event.json).
     """
 
-    path_to_project_template = project_template.__path__[0]
-    for f in os.listdir(path_to_project_template):
-        path_to_file = os.path.join(path_to_project_template, f)
-        if minimal and f == 'event.json':
+    templates_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "project_templates")
+    for filename in os.listdir(templates_path):
+        if (minimal and filename == 'event.json') or filename.endswith('.pyc'):
             continue
-        if f.endswith('.pyc'):
-            # We don't need the compiled files.
-            continue
-        copy(path_to_file, src)
+        destination = os.path.join(templates_path, filename)
+        copy(destination, src)
 
 
-def build(src):
+def build(src, local_package=None):
     """Builds the file bundle.
 
-    :param str path_to_handler_file:
-       The path to handler (main execution) file.
-    :param str path_to_dist:
-       The path to the folder for distributable.
-    :param str output_filename:
-       The name of the archive file.
+    :param str src:
+       The path to your Lambda ready project (folder must contain a valid
+        config.yaml and handler module (e.g.: service.py).
+    :param str local_package:
+        The path to a local package with should be included in the deploy as
+        well (and/or is not available on PyPi)
     """
     # Load and parse the config file.
     path_to_config_file = os.path.join(src, 'config.yaml')
@@ -126,9 +171,10 @@ def build(src):
     function_name = cfg.get('function_name')
     output_filename = "{0}-{1}.zip".format(timestamp(), function_name)
     path_to_temp = mkdtemp(prefix='aws-lambda')
+    
     standalone = cfg.get('standalone', False)
     if not standalone:
-        pip_install_to_target(path_to_temp)
+        pip_install_to_target(path_to_temp, local_package)
 
     # Gracefully handle whether ".zip" was included in the filename or not.
     output_filename = ('{0}.zip'.format(output_filename)
@@ -189,30 +235,40 @@ def get_handler_filename(handler):
     return '{0}.py'.format(module_name)
 
 
-def pip_install_to_target(path):
+def pip_install_to_target(path, local_package=None):
     """For a given active virtualenv, gather all installed pip packages then
     copy (re-install) them to the path provided.
 
     :param str path:
         Path to copy installed pip packages to.
+    :param str local_package:
+        The path to a local package with should be included in the deploy as
+        well (and/or is not available on PyPi)
     """
     print('Gathering pip packages')
     for r in pip.operations.freeze.freeze():
         if r.startswith('Python=='):
             # For some reason Python is coming up in pip freeze.
             continue
+        elif r.startswith('-e '):
+            r = r.replace('-e ','')
+
+        print('Installing {package}'.format(package=r))
         pip.main(['install', r, '-t', path, '--ignore-installed'])
 
+    if local_package is not None:
+        pip.main(['install', local_package, '-t', path])
 
-def get_role_name(account_id):
-    """Shortcut to insert the `account_id` into the iam string."""
-    return "arn:aws:iam::{0}:role/lambda_basic_execution".format(account_id)
+
+def get_role_name(account_id, role):
+    """Shortcut to insert the `account_id` and `role` into the iam string."""
+    return "arn:aws:iam::{0}:role/{1}".format(account_id, role)
 
 
 def get_account_id(aws_access_key_id, aws_secret_access_key):
-    """Query IAM for a users' account_id"""
-    client = get_client('iam', aws_access_key_id, aws_secret_access_key)
-    return client.get_user()['User']['Arn'].split(':')[4]
+    """Query STS for a users' account_id"""
+    client = get_client('sts', aws_access_key_id, aws_secret_access_key)
+    return client.get_caller_identity().get('Account')
 
 
 def get_client(client, aws_access_key_id, aws_secret_access_key, region=None):
@@ -235,13 +291,15 @@ def create_function(cfg, path_to_zip_file):
     aws_secret_access_key = cfg.get('aws_secret_access_key')
 
     account_id = get_account_id(aws_access_key_id, aws_secret_access_key)
-    role = get_role_name(account_id)
+    role = get_role_name(account_id, cfg.get('role', 'lambda_basic_execution'))
 
     client = get_client('lambda', aws_access_key_id, aws_secret_access_key,
                         cfg.get('region'))
 
+    function_name = os.environ.get('LAMBDA_FUNCTION_NAME') or cfg.get('function_name')
+    print('Creating lambda function with name: {}'.format(function_name))
     client.create_function(
-        FunctionName=cfg.get('function_name'),
+        FunctionName=function_name,
         Runtime=cfg.get('runtime', 'python2.7'),
         Role=role,
         Handler=cfg.get('handler'),
@@ -249,6 +307,13 @@ def create_function(cfg, path_to_zip_file):
         Description=cfg.get('description'),
         Timeout=cfg.get('timeout', 15),
         MemorySize=cfg.get('memory_size', 512),
+        Environment={
+            'Variables': {
+                key.strip('LAMBDA_'): value
+                for key, value in os.environ.items()
+                if key.startswith('LAMBDA_')
+            }
+        },
         Publish=True
     )
 
@@ -261,6 +326,9 @@ def update_function(cfg, path_to_zip_file):
     aws_access_key_id = cfg.get('aws_access_key_id')
     aws_secret_access_key = cfg.get('aws_secret_access_key')
 
+    account_id = get_account_id(aws_access_key_id, aws_secret_access_key)
+    role = get_role_name(account_id, cfg.get('role', 'lambda_basic_execution'))
+
     client = get_client('lambda', aws_access_key_id, aws_secret_access_key,
                         cfg.get('region'))
 
@@ -268,6 +336,19 @@ def update_function(cfg, path_to_zip_file):
         FunctionName=cfg.get('function_name'),
         ZipFile=byte_stream,
         Publish=True
+    )
+
+    client.update_function_configuration(
+        FunctionName=cfg.get('function_name'),
+        Role=role,
+        Handler=cfg.get('handler'),
+        Description=cfg.get('description'),
+        Timeout=cfg.get('timeout', 15),
+        MemorySize=cfg.get('memory_size', 512),
+        VpcConfig={
+            'SubnetIds': cfg.get('subnet_ids', []),
+            'SecurityGroupIds': cfg.get('security_group_ids', [])
+        }
     )
 
 
